@@ -334,7 +334,8 @@ def random_circuit(
     min_qubits=MIN_QUBITS,
     max_qubits=MAX_QUBITS,
     min_steps=MIN_STEPS,
-    max_steps=MAX_STEPS
+    max_steps=MAX_STEPS,
+    max_gates=50
 ):
     """
     Generate a more diverse synthetic circuit.
@@ -352,6 +353,9 @@ def random_circuit(
     ML training distribution.
     """
 
+    if max_gates < 1:
+        raise ValueError("max_gates must be positive")
+
     num_qubits = random.randint(
         min_qubits,
         max_qubits
@@ -367,6 +371,7 @@ def random_circuit(
     )
 
     for _ in range(number_of_steps):
+        previous_length = len(circuit.data)
 
         choice = random.random()
 
@@ -441,6 +446,12 @@ def random_circuit(
             add_mixed_pattern(
                 circuit
             )
+
+        # Roll back a whole generated block rather than cutting a gate pair.
+        if len(circuit.data) > max_gates:
+            while len(circuit.data) > previous_length:
+                circuit.data.pop()
+            break
 
     return circuit
 

@@ -272,158 +272,32 @@ def prepare_gate_optimizer_data(circuits):
 # TRAIN CNN
 # ============================================================
 
-def train_gate_optimizer(
-    model,
-    X,
-    y,
-    valid,
-    epochs=200
-):
-    """
-    Train the gate-level CNN.
-
-    The model learns:
-
-    Circuit
-        ↓
-    Local gate patterns
-        ↓
-    Probability that each gate should be removed
-    """
-
-    # --------------------------------------------------------
-    # Convert NumPy arrays into PyTorch tensors
-    # --------------------------------------------------------
-
-    X = torch.tensor(
-        X,
-        dtype=torch.float32
-    )
-
-    y = torch.tensor(
-        y,
-        dtype=torch.float32
-    )
-
-    valid = torch.tensor(
-        valid,
-        dtype=torch.float32
-    )
-
-
-    # --------------------------------------------------------
-    # Adam optimizer
-    # --------------------------------------------------------
-
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=0.001
-    )
-
-
-    # --------------------------------------------------------
-    # Binary classification loss
-    # --------------------------------------------------------
-    #
-    # Every gate has:
-    #
-    # 0 = KEEP
-    # 1 = REMOVE
-    #
-    # reduction="none" allows us to calculate loss
-    # separately for every gate position.
-    #
-
-    criterion = nn.BCEWithLogitsLoss(
-        reduction="none"
-    )
-
-
-    # Tell PyTorch this model is being trained
+def train_gate_optimizer(model, X, y, valid, epochs=200, batch_size=64, seed=42):
+    """Train using mini-batches, excluding padded positions from the loss."""
+    if len(X) == 0 or batch_size < 1 or epochs < 1:
+        raise ValueError("Training needs data, positive batch_size and positive epochs")
+    X, y, valid = [torch.as_tensor(a, dtype=torch.float32) for a in (X, y, valid)]
+    if X.shape[:2] != y.shape or y.shape != valid.shape:
+        raise ValueError("Training input, target and padding-mask shapes disagree")
+    dataset = torch.utils.data.TensorDataset(X, y, valid)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                                         generator=torch.Generator().manual_seed(seed))
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.BCEWithLogitsLoss(reduction="none")
     model.train()
-
-
-    # ========================================================
-    # TRAINING LOOP
-    # ========================================================
-
     for epoch in range(epochs):
-
-        # ----------------------------------------------------
-        # Forward pass
-        # ----------------------------------------------------
-
-        logits = model(X)
-
-
-        # ----------------------------------------------------
-        # Calculate loss for every gate position
-        # ----------------------------------------------------
-
-        raw_loss = criterion(
-            logits,
-            y
-        )
-
-
-        # ----------------------------------------------------
-        # Ignore padding positions
-        # ----------------------------------------------------
-
-        masked_loss = (
-            raw_loss
-            * valid
-        )
-
-
-        # ----------------------------------------------------
-        # Average loss only over real gates
-        # ----------------------------------------------------
-
-        valid_count = valid.sum().clamp_min(
-            1.0
-        )
-
-        loss = (
-            masked_loss.sum()
-            / valid_count
-        )
-
-
-        # ----------------------------------------------------
-        # Reset old gradients
-        # ----------------------------------------------------
-
-        optimizer.zero_grad()
-
-
-        # ----------------------------------------------------
-        # Backpropagation
-        # ----------------------------------------------------
-
-        loss.backward()
-
-
-        # ----------------------------------------------------
-        # Update neural network weights
-        # ----------------------------------------------------
-
-        optimizer.step()
-
-
-        # ----------------------------------------------------
-        # Display training progress
-        # ----------------------------------------------------
-
+        epoch_loss, count = 0.0, 0.0
+        for batch_x, batch_y, batch_valid in loader:
+            raw_loss = criterion(model(batch_x), batch_y) * batch_valid
+            denominator = batch_valid.sum().clamp_min(1)
+            loss = raw_loss.sum() / denominator
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += float(raw_loss.detach().sum())
+            count += float(batch_valid.sum())
         if epoch % 10 == 0:
-
-            print(
-                f"Epoch {epoch} | "
-                f"CNN gate optimizer loss = "
-                f"{loss.item():.4f}"
-            )
-
-
+            print(f"Epoch {epoch} | CNN loss = {epoch_loss / max(1, count):.4f}")
     return model
 
 

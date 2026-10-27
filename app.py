@@ -17,6 +17,7 @@ from src.gate_optimizer import (
     ml_optimize_circuit,
 )
 from src.optimizer import validate_optimization
+from src.circuit_utils import check_circuit_equivalence
 from src.model_utils import load_model
 from src.benchmarks import get_benchmark_names, create_benchmark
 
@@ -25,8 +26,9 @@ from src.benchmarks import get_benchmark_names, create_benchmark
 # SETTINGS
 # ============================================================
 
-MODEL_PATH = "models/gate_optimizer_cnn.pth"
-METRICS_PATH = "models/evaluation_metrics.json"
+ROOT = Path(__file__).resolve().parent
+MODEL_PATH = str(ROOT / "models/gate_optimizer_cnn.pth")
+METRICS_PATH = str(ROOT / "models/evaluation_metrics.json")
 ML_THRESHOLD = 0.60
 OPERATOR_EQ_TOLERANCE_LABEL = "Exact operator equivalence"
 MAX_MODEL_QUBITS = 4
@@ -51,17 +53,7 @@ z q[1];
 z q[1];
 """
 
-FALLBACK_METRICS = {
-    "test_circuits": 2000,
-    "gate_accuracy": 0.9788,
-    "precision": 0.9764,
-    "recall": 0.9872,
-    "f1_score": 0.9818,
-    "exact_mask_accuracy": 0.5910,
-    "operator_equivalence_rate": 0.6035,
-    "safe_optimization_rate": 0.6025,
-    "overall_gate_reduction": 58.50,
-}
+
 
 
 # ============================================================
@@ -657,18 +649,16 @@ def load_cnn_model():
 
 @st.cache_data
 def load_saved_metrics():
-    path = Path(METRICS_PATH)
-    if not path.exists():
-        return FALLBACK_METRICS.copy()
-
+    # Legacy artifact has no training/data provenance. Never invent results.
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with Path(METRICS_PATH).open(encoding="utf-8") as handle:
             loaded = json.load(handle)
-        merged = FALLBACK_METRICS.copy()
-        merged.update(loaded)
-        return merged
-    except Exception:
-        return FALLBACK_METRICS.copy()
+        required = {"gate_accuracy", "f1_score", "exact_mask_accuracy",
+                    "operator_equivalence_rate", "safe_optimization_rate",
+                    "overall_gate_reduction", "test_circuits"}
+        return loaded if required.issubset(loaded) else None
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def build_circuit_from_qasm(qasm_text):
@@ -862,6 +852,9 @@ def circuit_preflight(circuit):
             f"This saved CNN supports at most {MAX_MODEL_GATES} gate positions; "
             f"this circuit has {len(circuit.data)} gates."
         )
+    result = check_circuit_equivalence(circuit, circuit)
+    if result["status"] == "inconclusive":
+        issues.append(result["reason"])
     return issues
 
 
@@ -895,6 +888,8 @@ def metric_html(original, proposed=None, final=None, reduction=None):
 
 
 def performance_html(metrics):
+    if metrics is None:
+        return "<div class='q-card'>No saved evaluation results are available.</div>"
     rows = [
         ("Gate Accuracy", f"{metrics['gate_accuracy'] * 100:.2f}%", False),
         ("Precision", f"{metrics.get('precision', 0) * 100:.2f}%", False),
@@ -915,10 +910,10 @@ def performance_html(metrics):
     return f"""
 <div class="q-card q-fade-5">
   <div class="q-card-title">Model Performance</div>
-  <div class="q-eyebrow">{int(metrics.get('test_circuits', 2000)):,} unseen test circuits</div>
+  <div class="q-eyebrow">{int(metrics['test_circuits']):,} circuits in the legacy report — dataset provenance unverified</div>
   <div style="margin-top:10px">{body}</div>
   <div style="margin-top:13px;padding:10px;border:1px solid var(--q-border);border-radius:6px;background:#111815;color:#9DA69E;font-size:.75rem;line-height:1.5">
-    Gate-level metrics measure individual KEEP/REMOVE decisions. Operator equivalence checks the complete circuit transformation.
+    Historical CNN results, not GNN results. Labels have since been corrected; rerun evaluation before making performance claims.
   </div>
 </div>
 """
@@ -1255,6 +1250,7 @@ left, right = st.columns([0.31, 0.69], gap="large")
 with left:
     st.markdown("<div class='q-eyebrow'>CIRCUIT INPUT</div>", unsafe_allow_html=True)
     st.markdown("### Build or import a circuit")
+    st.page_link("pages/1_Graph_Lab.py", label="Open Graph Optimizer Lab", icon="🔬")
 
     circuit_source = st.radio(
         "Input method",
@@ -1356,18 +1352,8 @@ if optimize_clicked and circuit_valid and model_loaded:
         time.sleep(0.55)
 
         scan_slot.markdown(live_pipeline_html(2, "RUNNING CNN INFERENCE"), unsafe_allow_html=True)
-        predicted_mask, probabilities = predict_gate_mask(
-            model,
-            user_circuit,
-            threshold=ML_THRESHOLD,
-        )
-        time.sleep(0.65)
-
-        scan_slot.markdown(live_pipeline_html(3, "BUILDING ML PROPOSAL"), unsafe_allow_html=True)
-        candidate_circuit, _, _ = ml_optimize_circuit(
-            user_circuit,
-            model,
-            threshold=ML_THRESHOLD,
+        candidate_circuit, predicted_mask, probabilities = ml_optimize_circuit(
+            user_circuit, model, threshold=ML_THRESHOLD,
         )
         time.sleep(0.55)
 

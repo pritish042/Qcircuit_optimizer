@@ -56,7 +56,8 @@ def load_model(
 
     state_dict = torch.load(
         path,
-        map_location="cpu"
+        map_location="cpu",
+        weights_only=True
     )
 
     model.load_state_dict(

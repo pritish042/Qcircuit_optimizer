@@ -8,15 +8,8 @@
 # ============================================================
 
 from qiskit import QuantumCircuit
-
-from .circuit_utils import compare_circuits
-
-from qiskit import QuantumCircuit
-
-from .circuit_utils import (
-    compare_circuits,
-    check_circuit_equivalence
-)
+from .circuit_utils import check_circuit_equivalence
+from .graph_optimizer import STANDARD
 
 # ============================================================
 # 1. RULE-BASED OPTIMIZER
@@ -46,125 +39,14 @@ def remove_redundant_gates(
     H
     """
 
-    # Create an empty circuit with the same
-    # registers/qubits/classical bits.
-    new_qc = qc.copy_empty_like()
-
-    # Gates that are self-inverse:
-    #
-    # applying them twice gives identity.
-    cancellable_gates = {
-        "x",
-        "h",
-        "y",
-        "z",
-        "cx"
-    }
-
-    # Store gates that survive optimization
-    kept_gates = []
-
-    # --------------------------------------------------------
-    # Examine each gate
-    # --------------------------------------------------------
-
-    for instruction in qc.data:
-
-        gate_name = (
-            instruction
-            .operation
-            .name
-        )
-
-        qubits = instruction.qubits
-
-        # ----------------------------------------------------
-        # Compare with previous gate
-        # ----------------------------------------------------
-
-        if kept_gates:
-
-            last_instruction = (
-                kept_gates[-1]
-            )
-
-            last_name = (
-                last_instruction
-                .operation
-                .name
-            )
-
-            last_qubits = (
-                last_instruction.qubits
-            )
-
-            # ------------------------------------------------
-            # Two neighbouring identical self-inverse gates
-            # on the same qubits cancel.
-            # ------------------------------------------------
-
-            if (
-                gate_name == last_name
-                and qubits == last_qubits
-                and gate_name in cancellable_gates
-            ):
-
-                # Remove previous gate
-                kept_gates.pop()
-
-                # Do not add current gate either
-                continue
-
-        # Otherwise keep the gate
-        kept_gates.append(
-            instruction
-        )
-
-    # --------------------------------------------------------
-    # Rebuild optimized circuit
-    # --------------------------------------------------------
-
-    for instruction in kept_gates:
-
-        new_qubits = []
-
-        for qubit in instruction.qubits:
-
-            qubit_index = (
-                qc
-                .find_bit(qubit)
-                .index
-            )
-
-            new_qubits.append(
-                new_qc.qubits[
-                    qubit_index
-                ]
-            )
-
-        new_clbits = []
-
-        for clbit in instruction.clbits:
-
-            clbit_index = (
-                qc
-                .find_bit(clbit)
-                .index
-            )
-
-            new_clbits.append(
-                new_qc.clbits[
-                    clbit_index
-                ]
-            )
-
-        new_qc.append(
-            instruction.operation,
-            new_qubits,
-            new_clbits
-        )
-
-    return new_qc
+    mask = get_redundancy_mask(qc)
+    result = qc.copy_empty_like()
+    for index, instruction in enumerate(qc.data):
+        if not mask[index]:
+            result.append(instruction.operation,
+                          [result.qubits[qc.find_bit(q).index] for q in instruction.qubits],
+                          [result.clbits[qc.find_bit(c).index] for c in instruction.clbits])
+    return result
 
 
 # ============================================================
@@ -267,6 +149,9 @@ def get_redundancy_mask(qc):
                 gate_name == previous_name
                 and qubits == previous_qubits
                 and gate_name in cancellable_gates
+                and instruction.operation.base_class is STANDARD[gate_name]
+                and previous_instruction.operation.base_class is STANDARD[gate_name]
+                and not instruction.clbits and not previous_instruction.clbits
             ):
 
                 # Mark BOTH gates for removal
@@ -298,34 +183,6 @@ def get_redundancy_mask(qc):
 # ============================================================
 
 
-
-def get_redundancy_mask(circuit):
-    """
-    Generate rule-based redundancy mask for a quantum circuit.
-    Finds adjacent self-inverse gate pairs on the same qubit(s).
-    """
-    mask = [0] * len(circuit.data)
-    i = 0
-    while i < len(circuit.data) - 1:
-        current_inst = circuit.data[i]
-        next_inst = circuit.data[i + 1]
-
-        current_op = current_inst.operation.name
-        next_op = next_inst.operation.name
-
-        current_qubits = [circuit.find_bit(q).index for q in current_inst.qubits]
-        next_qubits = [circuit.find_bit(q).index for q in next_inst.qubits]
-
-        # Check self-inverse adjacent single/two-qubit gates
-        if (current_op == next_op) and (current_qubits == next_qubits):
-            if current_op in ["x", "y", "z", "h", "cx"]:
-                mask[i] = 1
-                mask[i + 1] = 1
-                i += 2
-                continue
-        i += 1
-
-    return mask
 
 def validate_optimization(
     original_circuit: QuantumCircuit,

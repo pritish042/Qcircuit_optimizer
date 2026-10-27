@@ -191,6 +191,11 @@ def encode_circuit_for_cnn(circuit):
     which the old encoder could NOT do.
     """
 
+    if len(circuit.data) > MAX_GATES:
+        raise ValueError(f"CNN supports at most {MAX_GATES} gates; refusing silent truncation.")
+    if circuit.num_qubits > MAX_QUBITS:
+        raise ValueError(f"CNN supports at most {MAX_QUBITS} qubits.")
+
     # Start with an empty matrix filled with zeros.
     #
     # Rows = gate positions

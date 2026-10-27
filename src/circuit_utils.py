@@ -82,110 +82,57 @@ def circuit_to_features(circuit):
 # EXACT OPERATOR EQUIVALENCE CHECK (FULL QUANTUM SAFETY LAYER)
 # ============================================================
 
-def check_circuit_equivalence(
-    circuit1: QuantumCircuit,
-    circuit2: QuantumCircuit,
-    tolerance: float = 1e-7
-) -> dict:
+MAX_EXACT_QUBITS = 8
+
+
+def check_circuit_equivalence(circuit1, circuit2, tolerance=1e-7,
+                              max_qubits=MAX_EXACT_QUBITS) -> dict:
+    """Bounded numerical operator comparison up to global phase.
+
+    Unsupported or oversized inputs are inconclusive, never a proof of
+    non-equivalence. ``equivalent`` remains false for compatibility with the
+    legacy accept/reject API, so inconclusive proposals are not accepted.
     """
-    Verify full quantum circuit equivalence up to global phase.
+    from qiskit.circuit import Gate
 
-    This function compares the full unitary matrices U1 and U2 representing 
-    the two circuits rather than merely testing state outputs from |0...0>.
+    if not np.isfinite(tolerance) or not 0 < tolerance <= 1e-3:
+        raise ValueError("tolerance must be finite and between 0 and 1e-3")
+    if not isinstance(max_qubits, int) or not 1 <= max_qubits <= MAX_EXACT_QUBITS:
+        raise ValueError(f"max_qubits must be between 1 and {MAX_EXACT_QUBITS}")
 
-    SCALABILITY WARNING:
-    Exact unitary calculation scales exponentially with the number of qubits (2^N x 2^N).
-    This method is used as an exact safety check for small circuits (<= 4 qubits)
-    and will not scale to large quantum algorithms.
+    def result(status, reason, error=None, phase=None):
+        return {"status": status, "equivalent": status == "equivalent",
+                "reason": reason, "equivalence_error": error,
+                "global_phase_angle": phase, "method": "numerical_operator"}
 
-    Parameters:
-        circuit1: Original QuantumCircuit.
-        circuit2: Optimized/Candidate QuantumCircuit.
-        tolerance: Numerical tolerance for matrix equality.
-
-    Returns:
-        dict containing:
-            - "equivalent": bool
-            - "reason": str
-            - "equivalence_error": float
-            - "global_phase_angle": float or None
-    """
-    # 1. Qubit Count Check
     if circuit1.num_qubits != circuit2.num_qubits:
-        return {
-            "equivalent": False,
-            "reason": f"Qubit mismatch: circuit1 has {circuit1.num_qubits} qubits, circuit2 has {circuit2.num_qubits} qubits.",
-            "equivalence_error": 1.0,
-            "global_phase_angle": None
-        }
-
-    # 2. Non-unitary instruction check (e.g., measurements, resets)
-    for qc, name in [(circuit1, "Original"), (circuit2, "Candidate")]:
-        for instruction in qc.data:
-            op_name = instruction.operation.name.lower()
-            if op_name in ["measure", "reset", "barrier"]:
-                return {
-                    "equivalent": False,
-                    "reason": f"Non-unitary or control instruction '{op_name}' present in {name} circuit.",
-                    "equivalence_error": 1.0,
-                    "global_phase_angle": None
-                }
-
-    # 3. Obtain Operator Matrices
+        return result("not_equivalent", "Qubit counts differ.")
+    if circuit1.num_qubits > max_qubits:
+        return result("inconclusive", f"Exact verification is limited to {max_qubits} qubits.")
+    for circuit in (circuit1, circuit2):
+        if circuit.parameters:
+            return result("inconclusive", "Bind all parameters before verification.")
+        for item in circuit.data:
+            if item.operation.name == "barrier":
+                continue
+            if not isinstance(item.operation, Gate) or item.clbits:
+                return result("inconclusive", "Only bound unitary gates and barriers are supported.")
     try:
-        U1 = Operator(circuit1).data
-        U2 = Operator(circuit2).data
+        u1, u2 = Operator(circuit1).data, Operator(circuit2).data
     except Exception as error:
-        return {
-            "equivalent": False,
-            "reason": f"Could not construct Operator matrix: {error}",
-            "equivalence_error": 1.0,
-            "global_phase_angle": None
-        }
-
-    # 4. Compare Matrices up to Global Phase
-    # Find the first entry in U1 with magnitude significantly above zero to extract global phase factor.
-    non_zero_indices = np.where(np.abs(U1) > 1e-5)
-    if len(non_zero_indices[0]) == 0:
-        return {
-            "equivalent": False,
-            "reason": "Operator matrix U1 is zero or invalid.",
-            "equivalence_error": 1.0,
-            "global_phase_angle": None
-        }
-
-    idx = (non_zero_indices[0][0], non_zero_indices[1][0])
-    u1_elem = U1[idx]
-    u2_elem = U2[idx]
-
-    if np.abs(u2_elem) < 1e-5:
-        return {
-            "equivalent": False,
-            "reason": f"Matrix mismatch at element {idx}: U1 is non-zero but U2 is zero.",
-            "equivalence_error": 1.0,
-            "global_phase_angle": None
-        }
-
-    # Phase factor phase_factor = e^(i * phi) such that U2 ≈ phase_factor * U1
-    phase_factor = u2_elem / u1_elem
-    # Normalize to pure unit complex number |e^(i*phi)| = 1
-    phase_factor /= np.abs(phase_factor)
-
-    # Re-aligned matrix check: U2 - exp(i * phi) * U1
-    diff_matrix = U2 - (phase_factor * U1)
-    max_diff = float(np.max(np.abs(diff_matrix)))
-
-    is_equivalent = max_diff <= tolerance
-    phase_angle = float(np.angle(phase_factor))
-
-    if is_equivalent:
-        reason = "Circuits are mathematically equivalent up to global phase."
-    else:
-        reason = f"Unitary operators differ. Maximum entrywise discrepancy: {max_diff:.8e}"
-
-    return {
-        "equivalent": is_equivalent,
-        "reason": reason,
-        "equivalence_error": max_diff,
-        "global_phase_angle": phase_angle
-    }
+        return result("inconclusive", f"Cannot construct operators: {error}")
+    if not np.isfinite(u1).all() or not np.isfinite(u2).all():
+        return result("inconclusive", "Operators contain non-finite entries.")
+    # Largest-magnitude entry avoids extracting phase from a tiny coefficient.
+    index = np.unravel_index(np.argmax(np.abs(u1)), u1.shape)
+    if abs(u1[index]) == 0:
+        return result("inconclusive", "Invalid zero operator.")
+    if abs(u2[index]) == 0:
+        return result("not_equivalent", "Operator support differs.", float(abs(u1[index])))
+    phase = u2[index] / u1[index]
+    phase /= abs(phase)
+    error = float(np.max(np.abs(u2 - phase * u1)))
+    status = "equivalent" if error <= tolerance else "not_equivalent"
+    return result(status, "Operators agree up to global phase within tolerance."
+                  if status == "equivalent" else "Operators differ beyond tolerance.",
+                  error, float(np.angle(phase)))
